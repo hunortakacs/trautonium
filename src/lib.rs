@@ -5,7 +5,7 @@ mod macros;
 
 pub mod audio;
 pub mod config;
-pub mod effects;
 pub mod controls;
-pub mod wavetables;
+pub mod effects;
 pub mod voice;
+pub mod wavetables;

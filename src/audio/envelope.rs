@@ -1,6 +1,7 @@
 //! Attack/Release envelope generator
 
 use crate::config::AUDIO_SAMPLE_RATE;
+use crate::config::{PRESSURE_GATE_OFF, PRESSURE_GATE_ON};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EnvState {
@@ -36,38 +37,40 @@ impl Envelope {
         self.release_rate = 1.0 / (time_seconds * AUDIO_SAMPLE_RATE as f32);
     }
 
-    pub fn trigger(&mut self) {
-        self.state = EnvState::Attack;
-    }
+    pub fn process(&mut self, pressure: f32) -> f32 {
+        let pressure = pressure.clamp(0.0, 1.0);
+        let was_open = !matches!(self.state, EnvState::Idle);
 
-    pub fn release(&mut self) {
-        if self.state != EnvState::Idle {
-            self.state = EnvState::Release;
-        }
-    }
+        let gate_open = if pressure >= PRESSURE_GATE_ON {
+            true
+        } else if pressure <= PRESSURE_GATE_OFF {
+            false
+        } else {
+            was_open
+        };
 
-    pub fn process(&mut self) -> f32 {
-        match self.state {
-            EnvState::Attack => {
-                self.level += self.attack_rate;
-                if self.level >= 1.0 {
-                    self.level = 1.0;
-                    self.state = EnvState::Sustain;
-                }
-            }
-            EnvState::Sustain => {
-                // Hold at 1.0
-            }
-            EnvState::Release => {
-                self.level -= self.release_rate;
-                if self.level <= 0.0 {
-                    self.level = 0.0;
-                    self.state = EnvState::Idle;
-                }
-            }
-            EnvState::Idle => {
-                self.level = 0.0;
-            }
+        let target = if gate_open { pressure } else { 0.0 };
+
+        if target > self.level {
+            self.level = (self.level + self.attack_rate).min(target);
+            self.state = if (self.level - target).abs() <= f32::EPSILON {
+                EnvState::Sustain
+            } else {
+                EnvState::Attack
+            };
+        } else if target < self.level {
+            self.level = (self.level - self.release_rate).max(target);
+            self.state = if self.level <= 0.0 {
+                EnvState::Idle
+            } else {
+                EnvState::Release
+            };
+        } else {
+            self.state = if self.level <= 0.0 {
+                EnvState::Idle
+            } else {
+                EnvState::Sustain
+            };
         }
 
         self.level

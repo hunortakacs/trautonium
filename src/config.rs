@@ -9,6 +9,8 @@ pub const WAVETABLE_SIZE: usize = 1024;
 pub const ADC_MAX_VALUE: f32 = 4095.0; // 12-bit ADC
 pub const ADC_SMOOTHING_ALPHA: f32 = 0.3; // Low-pass filter coefficient (0.0-1.0, lower = smoother)
 pub const MUX_SETTLE_DELAY_US: u32 = 12;
+pub const PRESSURE_GATE_ON: f32 = 0.12;
+pub const PRESSURE_GATE_OFF: f32 = 0.08;
 
 setup_mux_adc_inputs!(AdcInputs, {
     mux_select: {

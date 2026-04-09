@@ -15,6 +15,7 @@ pub struct Voice {
     lfo: LFO,
     sub_level: f32,
     pressure: f32,
+    pressure_filter_amt: f32,
 }
 
 impl Voice {
@@ -27,6 +28,7 @@ impl Voice {
             lfo: LFO::new(),
             sub_level: 0.0,
             pressure: 0.0,
+            pressure_filter_amt: 0.0,
         }
     }
 
@@ -56,13 +58,7 @@ impl Voice {
         // Update mix levels
         self.sub_level = controls.sub_level;
         self.pressure = controls.pressure;
-
-        // Trigger/release envelope based on pressure
-        if controls.pressure > 0.1 {
-            self.envelope.trigger();
-        } else {
-            self.envelope.release();
-        }
+        self.pressure_filter_amt = controls.pressure_filter_amt;
     }
 
     pub fn process_buffer(&mut self, buffer: &mut Vec<f32>) {
@@ -74,14 +70,20 @@ impl Voice {
             // Mix oscillators
             let mixed = main + sub * self.sub_level;
 
+            // Envelope follows pressure with AR timing and deadzone hysteresis.
+            let pressure_env = self.envelope.process(self.pressure);
+
             // Apply filter with LFO modulation
             let lfo_mod = self.lfo.process();
-            let modulated_cutoff = (self.filter.get_cutoff() + lfo_mod).clamp(0.0, 1.0);
+            let pressure_to_cutoff = pressure_env * self.pressure_filter_amt * 0.5;
+            let pressure_lfo_scale = 1.0 + pressure_env * self.pressure_filter_amt;
+            let modulated_cutoff =
+                (self.filter.get_cutoff() + pressure_to_cutoff + lfo_mod * pressure_lfo_scale)
+                    .clamp(0.0, 1.0);
             let filtered = self.filter.process_with_cutoff(mixed, modulated_cutoff);
 
-            // Apply envelope and pressure
-            let env = self.envelope.process();
-            let vol = env * self.pressure;
+            // Envelope output directly controls amplitude.
+            let vol = pressure_env;
 
             // Output to mono buffer
             buffer[i] = filtered * vol;
