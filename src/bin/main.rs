@@ -18,6 +18,7 @@ use esp_hal::system::Stack;
 use esp_hal::timer::timg::TimerGroup;
 use trautonium::config::{AUDIO_BUFFER_SIZE, AUDIO_CORE_STACK_SIZE, AdcInputs, SwitchInputs};
 use trautonium::controls::Controls;
+#[cfg(any(feature = "delay", feature = "reverb"))]
 use trautonium::effects::EffectEngine;
 use trautonium::voice::Voice;
 use trautonium::wavetables::Wavetables;
@@ -81,6 +82,7 @@ fn main() -> ! {
                 .expect("Failed to start circular DMA");
 
             let mut voice = Voice::new(&WAVETABLES);
+            #[cfg(any(feature = "delay", feature = "reverb"))]
             let mut effects = EffectEngine::new();
             let mut pipeline_buf = [0i16; AUDIO_BUFFER_SIZE];
             let mut controls = Controls::new_const();
@@ -91,11 +93,13 @@ fn main() -> ! {
                 if let Some(new_controls) = CONTROLS_SIGNAL.try_take() {
                     controls = new_controls;
                     voice.update_controls(&controls, &WAVETABLES);
+                    #[cfg(any(feature = "delay", feature = "reverb"))]
                     effects.update_params(&controls);
                 }
 
                 pipeline_buf.fill(0);
                 voice.process_buffer(&mut pipeline_buf, &controls);
+                #[cfg(any(feature = "delay", feature = "reverb"))]
                 effects.process_buffer(&mut pipeline_buf);
 
                 let mut samples_pushed = 0;

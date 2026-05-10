@@ -1,10 +1,13 @@
 use crate::controls::Controls;
 use crate::wavetables::Wavetables;
 
-use crate::config::{
-    ATTACK_MAX, ATTACK_MIN, DEFAULT_MASTER_VOLUME_Q15, LFO_RATE_MAX, LFO_RATE_MIN, RELEASE_MAX,
-    RELEASE_MIN,
-};
+use crate::config::DEFAULT_MASTER_VOLUME_Q15;
+
+#[cfg(feature = "envelope")]
+use crate::config::{ATTACK_MAX, ATTACK_MIN, RELEASE_MAX, RELEASE_MIN};
+
+#[cfg(feature = "lfo")]
+use crate::config::{LFO_RATE_MAX, LFO_RATE_MIN};
 
 #[cfg(feature = "note_snap")]
 use crate::config::NOTE_SNAP_COEFF;
@@ -17,6 +20,7 @@ use crate::audio::Filter;
 use crate::audio::LFO;
 use crate::audio::Oscillator;
 
+#[cfg(any(feature = "envelope", feature = "lfo", feature = "filter"))]
 #[inline(always)]
 fn map_range(value: f32, min: f32, max: f32) -> f32 {
     min + value * (max - min)
@@ -113,8 +117,7 @@ impl Voice {
         let freq = {
             let target = snap_to_nearest_note(freq);
             if self.smoothed_freq == 0.0 {
-                // First call — seed with exact target so there's no initial glide
-                // from 0 Hz.
+                // First call — seed with exact target so there's no initial glide from 0 Hz.
                 self.smoothed_freq = target;
             } else {
                 // One-pole lowpass: smoothed = coeff * smoothed + (1 - coeff) * target
