@@ -1,65 +1,61 @@
-//! Echo/delay effect with feedback
-
+use crate::config::{
+    AUDIO_SAMPLE_RATE, DELAY_DRY_GAIN_Q15, DELAY_FEEDBACK_MAX, DELAY_WET_GAIN_Q15,
+    MAX_DELAY_SAMPLES,
+};
 use allocator_api2::vec;
 use allocator_api2::vec::Vec;
 
-use crate::config::{AUDIO_SAMPLE_RATE, MAX_DELAY_SAMPLES};
-
 pub struct DelayEffect {
-    // Using Vec moves data to the Heap, preventing Stack Overflow
-    buffer: Vec<f32>,
+    buffer: Vec<i16>,
     write_pos: usize,
-    max_samples: usize,
-    delay_samples: f32, // now fractional
-    feedback: f32,
+    delay_samples: usize,
+    feedback_q15: i16,
+    mask: usize,
 }
 
 impl DelayEffect {
     pub fn new() -> Self {
         Self {
-            // Allocate exactly the memory needed on the heap
-            buffer: vec![0.0; MAX_DELAY_SAMPLES],
+            buffer: vec![0i16; MAX_DELAY_SAMPLES],
             write_pos: 0,
-            max_samples: MAX_DELAY_SAMPLES,
-            delay_samples: (MAX_DELAY_SAMPLES / 2) as f32,
-            feedback: 0.0,
+            delay_samples: MAX_DELAY_SAMPLES / 2,
+            feedback_q15: 0,
+            mask: MAX_DELAY_SAMPLES - 1, 
         }
     }
 
     pub fn set_time(&mut self, time_seconds: f32) {
-        let delay = time_seconds * AUDIO_SAMPLE_RATE as f32;
-        // Clamp to valid range
-        self.delay_samples = delay.clamp(1.0, (self.max_samples - 1) as f32);
+        let samples = (time_seconds * AUDIO_SAMPLE_RATE as f32) as usize;
+        self.delay_samples = samples.clamp(1, MAX_DELAY_SAMPLES - 1);
     }
 
     pub fn set_feedback(&mut self, feedback: f32) {
-        self.feedback = feedback.clamp(0.0, 0.95);
+        self.feedback_q15 = (feedback.clamp(0.0, DELAY_FEEDBACK_MAX) * 32767.0) as i16;
     }
 
-    pub fn process_buffer(&mut self, buffer: &mut [f32]) {
+    pub fn process_buffer(&mut self, buffer: &mut [i16]) {
+        let mask = self.mask;
+        let fb_q15 = self.feedback_q15 as i32;
+        let dry_gain = DELAY_DRY_GAIN_Q15 as i32;
+        let wet_gain = DELAY_WET_GAIN_Q15 as i32;
+
         for sample in buffer.iter_mut() {
-            // Calculate fractional read position
-            let delay = self.delay_samples;
-            let write_pos = self.write_pos as isize;
-            let max_samples = self.max_samples as isize;
-            let read_pos_f = write_pos as f32 - delay;
-            // Wrap negative positions
-            let read_pos_f = if read_pos_f < 0.0 {
-                read_pos_f + max_samples as f32
-            } else {
-                read_pos_f
-            };
-            let idx0 = libm::floorf(read_pos_f) as usize % self.max_samples;
-            let idx1 = (idx0 + 1) % self.max_samples;
-            let frac = read_pos_f - libm::floorf(read_pos_f);
-            let delayed = self.buffer[idx0] * (1.0 - frac) + self.buffer[idx1] * frac;
+            let read_pos = (self.write_pos.wrapping_sub(self.delay_samples)) & mask;
 
-            // Feedback loop
-            self.buffer[self.write_pos] = *sample + delayed * self.feedback;
+            let delayed = unsafe { *self.buffer.get_unchecked(read_pos) };
 
-            // Simple 30/70 mix
-            *sample = *sample * 0.7 + delayed * 0.3;
-            self.write_pos = (self.write_pos + 1) % self.max_samples;
+            let fb = (delayed as i32 * fb_q15) >> 15;
+            unsafe {
+                *self.buffer.get_unchecked_mut(self.write_pos) =
+                    (*sample).saturating_add(fb as i16);
+            }
+
+            let dry = (*sample as i32 * dry_gain) >> 15;
+            let wet = (delayed as i32 * wet_gain) >> 15;
+
+            *sample = (dry + wet).clamp(-32768, 32767) as i16;
+
+            self.write_pos = (self.write_pos + 1) & mask;
         }
     }
 }

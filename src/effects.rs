@@ -1,53 +1,63 @@
-//! EffectEngine: encapsulates delay and reverb processing for clean and efficient audio effect handling
-
 pub mod delay;
 pub mod reverb;
 
+#[cfg(feature = "delay")]
+use crate::config::{DELAY_TIME_MAX, DELAY_TIME_MIN};
+use crate::controls::Controls;
+#[cfg(feature = "delay")]
 use delay::DelayEffect;
+#[cfg(feature = "reverb")]
 use reverb::ReverbEffect;
 
-use crate::controls::Controls;
+#[inline(always)]
+fn map_range(value: f32, min: f32, max: f32) -> f32 {
+    min + value * (max - min)
+}
 
-/// EffectEngine manages delay and reverb effects in a single, efficient unit.
 pub struct EffectEngine {
+    #[cfg(feature = "delay")]
     delay: DelayEffect,
+
+    #[cfg(feature = "reverb")]
     reverb: ReverbEffect,
 }
 
 impl EffectEngine {
-    /// Create a new EffectEngine with given max buffer size
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "delay")]
             delay: DelayEffect::new(),
+
+            #[cfg(feature = "reverb")]
             reverb: ReverbEffect::new(),
         }
     }
 
-    /// Set delay and reverb parameters from controls
     pub fn update_params(&mut self, controls: &Controls) {
-        self.delay.set_time(controls.delay_time);
-        self.delay.set_feedback(controls.delay_feedback);
-        self.reverb.amount = controls.reverb_amount;
+        #[cfg(feature = "delay")]
+        {
+            self.delay.set_time(map_range(
+                controls.delay_time,
+                DELAY_TIME_MIN,
+                DELAY_TIME_MAX,
+            ));
+            self.delay.set_feedback(controls.delay_feedback);
+        }
+
+        #[cfg(feature = "reverb")]
+        self.reverb.set_amount(controls.reverb_amount);
     }
 
-    /// Process mono buffer in-place through delay and reverb
-    pub fn process_buffer(&mut self, buffer: &mut [f32]) {
+    pub fn process_buffer(&mut self, buffer: &mut [i16]) {
+        #[cfg(feature = "delay")]
         self.delay.process_buffer(buffer);
-        self.reverb.process_buffer(buffer);
-    }
 
-    /// Accessors if needed
-    pub fn delay(&self) -> &DelayEffect {
-        &self.delay
-    }
-    pub fn delay_mut(&mut self) -> &mut DelayEffect {
-        &mut self.delay
-    }
-    pub fn reverb(&self) -> &ReverbEffect {
-        &self.reverb
-    }
-    pub fn reverb_mut(&mut self) -> &mut ReverbEffect {
-        &mut self.reverb
+        #[cfg(feature = "reverb")]
+        self.reverb.process_buffer(buffer);
+
+        for sample in buffer.iter_mut() {
+            *sample = (*sample).clamp(-32768, 32767);
+        }
     }
 }
 

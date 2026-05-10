@@ -1,32 +1,46 @@
 [package]
 edition = "2024"
-name = "trautonium-2"
+name = "trautonium"
 rust-version = "1.88"
 version = "0.1.0"
+default-run = "trautonium"
+
+[features]
+default = ["sub_osc", "lfo", "filter", "delay", "reverb", "note_snap"]
+sub_osc = []
+envelope = []
+lfo = []
+filter = []
+delay = []
+reverb = []
+note_snap = []
 
 [[bin]]
-name = "trautonium-2"
+name = "trautonium"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "~1.0", features = ["defmt", "esp32", "unstable"] }
+esp-hal = { version = "1.1.1", features = ["defmt", "esp32", "unstable"] }
+esp-rtos = { version = "0.3.0", features = ["defmt", "esp32", "embassy"] }
 
+embassy-executor = { version = "0.10.0", features = ["defmt"] }
+embassy-sync = { version = "0.8.0", features = ["defmt"] }
+embassy-time = { version = "0.5.1", features = ["defmt"] }
 
 defmt = "1.0.1"
-esp-bootloader-esp-idf = { version = "0.4.0", features = ["defmt", "esp32"] }
+esp-bootloader-esp-idf = { version = "0.5.0", features = ["defmt", "esp32"] }
 
 critical-section = "1.2.0"
-esp-alloc = { version = "0.9.0", features = ["defmt"] }
+esp-alloc = { version = "0.10.0", features = ["defmt"] }
 allocator-api2 = { version = "0.4.0", default-features = false, features = [
   "alloc",
 ] }
-esp-backtrace = { version = "0.18.1", features = [
+esp-backtrace = { version = "0.19.0", features = [
   "defmt",
   "esp32",
   "panic-handler",
 ] }
-esp-println = { version = "0.16.1", features = ["defmt-espflash", "esp32"] }
-
+esp-println = { version = "0.17.0", features = ["defmt-espflash", "esp32"] }
 
 paste = "1.0"
 nb = { version = "1.1.0" }

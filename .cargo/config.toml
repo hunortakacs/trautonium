@@ -1,4 +1,5 @@
 [target.xtensa-esp32-none-elf]
+linker = "xtensa-esp32-elf-gcc"
 runner = "espflash flash --monitor --chip esp32 --log-format defmt"
 
 [env]

@@ -94,7 +94,8 @@ macro_rules! setup_mux_adc_inputs {
                     let alpha = $crate::config::ADC_SMOOTHING_ALPHA;
                     let smoothed = alpha * (raw as f32) + (1.0 - alpha) * (*prev as f32);
                     *prev = smoothed as u32;
-                    smoothed / $crate::config::ADC_MAX_VALUE
+
+                    1.0 - (smoothed / $crate::config::ADC_MAX_VALUE)
                 }
 
                 fn prime_buffers(&mut self) {

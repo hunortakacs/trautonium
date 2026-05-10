@@ -1,121 +1,57 @@
-//! Resonant low-pass filter
+use crate::config::{AUDIO_SAMPLE_RATE, FILTER_FREQ_MAX, FILTER_FREQ_MIN, LFO_MAX_SWING_SEMITONES};
+use core::f32::consts::PI;
 
 pub struct Filter {
-    state: [f32; 4],
-    cutoff: f32,
-    resonance: f32,
-    // Filter coefficients
-    a1: f32,
-    a2: f32,
-    b0: f32,
-    b1: f32,
-    b2: f32,
+    ic1eq: f32,
+    ic2eq: f32,
+    g: f32,
+    k: f32,
 }
 
 impl Filter {
     pub fn new() -> Self {
         Self {
-            state: [0.0; 4],
-            cutoff: 1.0,
-            resonance: 0.0,
-            a1: 0.0,
-            a2: 0.0,
-            b0: 1.0,
-            b1: 0.0,
-            b2: 0.0,
+            ic1eq: 0.0,
+            ic2eq: 0.0,
+            g: 0.05,
+            k: 2.0,
         }
     }
 
-    pub fn set_cutoff(&mut self, cutoff: f32) {
-        self.cutoff = cutoff.clamp(0.0, 1.0);
-        self.update_coefficients();
+    pub fn set_params(&mut self, cutoff: f32, resonance: f32) {
+        // Calculate the frequency range ratio once
+        let range_ratio = FILTER_FREQ_MAX / FILTER_FREQ_MIN;
+
+        // Exponential mapping from 0.0-1.0 to Hz
+        let fc_hz = FILTER_FREQ_MIN * libm::powf(range_ratio, cutoff.clamp(0.0, 1.0));
+
+        // Normalize frequency and calculate the 'g' parameter (TPT SVF)
+        let fc_norm = (fc_hz / AUDIO_SAMPLE_RATE as f32).min(0.499);
+        self.g = libm::tanf(PI * fc_norm);
+
+        // Resonance mapping: 2.0 (flat) to 0.04 (self-oscillation)
+        self.k = 2.0 - resonance.clamp(0.0, 1.0) * 1.96;
     }
 
-    pub fn set_resonance(&mut self, resonance: f32) {
-        self.resonance = resonance.clamp(0.0, 1.0);
-        self.update_coefficients();
-    }
+    #[inline(always)]
+    pub fn process_lp(&mut self, input: i16, mod_q15: i16) -> i16 {
+        let semitones = (mod_q15 as f32 / 32767.0) * LFO_MAX_SWING_SEMITONES;
 
-    pub fn get_cutoff(&self) -> f32 {
-        self.cutoff
-    }
+        let g = (self.g * libm::powf(2.0, semitones / 12.0)).clamp(0.0005, 0.999);
 
-    fn update_coefficients(&mut self) {
-        // Calculate biquad low-pass filter coefficients
-        let sample_rate = crate::config::AUDIO_SAMPLE_RATE as f32;
-        let cutoff_freq = self.cutoff * (sample_rate * 0.5); // cutoff is 0-1, map to 0-Nyquist
-        let omega = 2.0 * core::f32::consts::PI * cutoff_freq / sample_rate;
+        let a1 = 1.0 / (1.0 + g * (g + self.k));
+        let a2 = g * a1;
+        let a3 = g * a2;
 
-        // Q factor from resonance (0-1), higher resonance = lower Q = more resonance
-        let q = 1.0 / (2.0 * (self.resonance * 0.9 + 0.1)); // avoid division by zero
+        let v0 = input as f32 / 32768.0;
+        let v3 = v0 - self.ic2eq;
+        let v1 = a1 * self.ic1eq + a2 * v3;
+        let v2 = self.ic2eq + a2 * self.ic1eq + a3 * v3;
 
-        let sin_omega = libm::sinf(omega);
-        let cos_omega = libm::cosf(omega);
-        let alpha = sin_omega / (2.0 * q);
+        self.ic1eq = 2.0 * v1 - self.ic1eq;
+        self.ic2eq = 2.0 * v2 - self.ic2eq;
 
-        // Low-pass filter coefficients
-        let b0 = (1.0 - cos_omega) / 2.0;
-        let b1 = 1.0 - cos_omega;
-        let b2 = (1.0 - cos_omega) / 2.0;
-        let a0 = 1.0 + alpha;
-        let a1 = -2.0 * cos_omega;
-        let a2 = 1.0 - alpha;
-
-        // Normalize by a0
-        self.b0 = b0 / a0;
-        self.b1 = b1 / a0;
-        self.b2 = b2 / a0;
-        self.a1 = a1 / a0;
-        self.a2 = a2 / a0;
-    }
-
-    pub fn process(&mut self, input: f32) -> f32 {
-        // Biquad filter difference equation:
-        // y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
-        let output = self.b0 * input + self.b1 * self.state[0] + self.b2 * self.state[1]
-            - self.a1 * self.state[2]
-            - self.a2 * self.state[3];
-
-        // Update state: shift x[n-1] -> x[n-2], y[n-1] -> y[n-2]
-        self.state[1] = self.state[0]; // x[n-2] = x[n-1]
-        self.state[0] = input; // x[n-1] = x[n]
-        self.state[3] = self.state[2]; // y[n-2] = y[n-1]
-        self.state[2] = output; // y[n-1] = y[n]
-
-        output
-    }
-
-    pub fn process_with_cutoff(&mut self, input: f32, cutoff: f32) -> f32 {
-        // Calculate coefficients for this sample's modulated cutoff
-        let sample_rate = crate::config::AUDIO_SAMPLE_RATE as f32;
-        let cutoff_freq = cutoff * (sample_rate * 0.5);
-        let omega = 2.0 * core::f32::consts::PI * cutoff_freq / sample_rate;
-
-        let q = 1.0 / (2.0 * (self.resonance * 0.9 + 0.1));
-        let sin_omega = libm::sinf(omega);
-        let cos_omega = libm::cosf(omega);
-        let alpha = sin_omega / (2.0 * q);
-
-        let b0 = (1.0 - cos_omega) / 2.0;
-        let b1 = 1.0 - cos_omega;
-        let b2 = (1.0 - cos_omega) / 2.0;
-        let a0 = 1.0 + alpha;
-        let a1 = -2.0 * cos_omega;
-        let a2 = 1.0 - alpha;
-
-        // Apply filter with these coefficients
-        let output = (b0 * input + b1 * self.state[0] + b2 * self.state[1]
-            - a1 * self.state[2]
-            - a2 * self.state[3])
-            / a0;
-
-        // Update state
-        self.state[1] = self.state[0];
-        self.state[0] = input;
-        self.state[3] = self.state[2];
-        self.state[2] = output;
-
-        output
+        (v2 * 32767.0).clamp(-32768.0, 32767.0) as i16
     }
 }
 

@@ -2,47 +2,129 @@
 #![no_main]
 #![deny(
     clippy::mem_forget,
-    reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
-    holding buffers for the duration of a data transfer."
+    reason = "mem::forget is generally not safe to do with esp_hal types."
 )]
 #![deny(clippy::large_stack_frames)]
 
-use allocator_api2::vec;
+use core::ptr::addr_of_mut;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 use esp_hal::clock::CpuClock;
-use esp_hal::dma_descriptors;
-use esp_hal::i2s::master::{Channels, Config as I2sConfig, DataFormat, I2s};
+use esp_hal::delay::Delay;
+use esp_hal::i2s::master::{Channels, Config as I2sConfig, I2s};
+use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::main;
-use esp_hal::time::Rate;
-use trautonium_2::config::{AUDIO_BUFFER_SIZE, AUDIO_SAMPLE_RATE, AdcInputs, SwitchInputs};
-use trautonium_2::controls::Controls;
-use trautonium_2::effects::EffectEngine;
-use trautonium_2::voice::Voice;
-use trautonium_2::wavetables::Wavetables;
+use esp_hal::system::Stack;
+use esp_hal::timer::timg::TimerGroup;
+use trautonium::config::{AUDIO_BUFFER_SIZE, AUDIO_CORE_STACK_SIZE, AdcInputs, SwitchInputs};
+use trautonium::controls::Controls;
+use trautonium::effects::EffectEngine;
+use trautonium::voice::Voice;
+use trautonium::wavetables::Wavetables;
 use {esp_backtrace as _, esp_println as _};
 
 extern crate alloc;
 
-// This creates a default app-descriptor required by the esp-idf bootloader.
-// For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[allow(
-    clippy::large_stack_frames,
-    reason = "it's not unusual to allocate larger buffers etc. in main"
-)]
+#[unsafe(link_section = ".data")]
+static WAVETABLES: Wavetables = Wavetables::new();
+static mut AUDIO_CORE_STACK: Stack<AUDIO_CORE_STACK_SIZE> = Stack::new();
+static CONTROLS_SIGNAL: Signal<CriticalSectionRawMutex, Controls> = Signal::new();
+
 #[main]
 fn main() -> ! {
-    // generator version: 1.2.0
-
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 96 * 1024);
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 80 * 1024);
 
-    static WAVETABLES: Wavetables = Wavetables::new();
-    let mut voice = Voice::new(&WAVETABLES);
-    let mut effects = EffectEngine::new();
-    let mut controls = Controls::new();
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    let sw_ints = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_ints.software_interrupt0);
+
+    let i2s0 = peripherals.I2S0;
+    let dma_i2s0 = peripherals.DMA_I2S0;
+    let bclk = peripherals.GPIO14;
+    let ws = peripherals.GPIO13;
+    let dout = peripherals.GPIO12;
+
+    esp_rtos::start_second_core(
+        peripherals.CPU_CTRL,
+        sw_ints.software_interrupt1,
+        unsafe { &mut *addr_of_mut!(AUDIO_CORE_STACK) },
+        move || {
+            const DMA_BUFFER_SIZE: usize = AUDIO_BUFFER_SIZE * 4 * 2;
+            let (_, tx_descriptors) = esp_hal::dma_circular_descriptors!(0, DMA_BUFFER_SIZE);
+
+            let i2s = I2s::new(
+                i2s0,
+                dma_i2s0,
+                I2sConfig::new_tdm_philips()
+                    .with_channels(Channels::STEREO)
+                    .with_data_format(esp_hal::i2s::master::DataFormat::Data16Channel16),
+            )
+            .expect("Failed to initialize I2S");
+
+            let mut i2s_tx = i2s
+                .i2s_tx
+                .with_bclk(bclk)
+                .with_ws(ws)
+                .with_dout(dout)
+                .build(tx_descriptors);
+
+            #[repr(align(4))]
+            struct AlignedBuffer([u8; DMA_BUFFER_SIZE]);
+            let frame_bytes = AlignedBuffer([0u8; DMA_BUFFER_SIZE]);
+            let mut transfer = i2s_tx
+                .write_dma_circular(&frame_bytes.0)
+                .expect("Failed to start circular DMA");
+
+            let mut voice = Voice::new(&WAVETABLES);
+            let mut effects = EffectEngine::new();
+            let mut pipeline_buf = [0i16; AUDIO_BUFFER_SIZE];
+            let mut controls = Controls::new_const();
+
+            esp_println::println!("Audio core: pipeline active");
+
+            loop {
+                if let Some(new_controls) = CONTROLS_SIGNAL.try_take() {
+                    controls = new_controls;
+                    voice.update_controls(&controls, &WAVETABLES);
+                    effects.update_params(&controls);
+                }
+
+                pipeline_buf.fill(0);
+                voice.process_buffer(&mut pipeline_buf, &controls);
+                effects.process_buffer(&mut pipeline_buf);
+
+                let mut samples_pushed = 0;
+                while samples_pushed < AUDIO_BUFFER_SIZE {
+                    transfer
+                        .push_with(|buf| {
+                            let space_in_dma = buf.len() / 4;
+                            let remaining = AUDIO_BUFFER_SIZE - samples_pushed;
+                            let to_copy = core::cmp::min(space_in_dma, remaining);
+
+                            for i in 0..to_copy {
+                                let sample = pipeline_buf[samples_pushed + i];
+                                let bytes = sample.to_le_bytes();
+                                let base = i << 2;
+                                buf[base] = bytes[0];
+                                buf[base + 1] = bytes[1];
+                                buf[base + 2] = bytes[0];
+                                buf[base + 3] = bytes[1];
+                            }
+
+                            samples_pushed += to_copy;
+                            to_copy * 4
+                        })
+                        .expect("push_with failed");
+                }
+            }
+        },
+    );
+
     let mut adc_inputs = AdcInputs::new(
         peripherals.ADC1,
         peripherals.GPIO25,
@@ -60,54 +142,13 @@ fn main() -> ! {
         peripherals.GPIO23,
     );
 
-    let (_, tx_descriptors) = dma_descriptors!(0, AUDIO_BUFFER_SIZE * 4);
-    let i2s = I2s::new(
-        peripherals.I2S0,
-        peripherals.DMA_I2S0,
-        I2sConfig::new_tdm_philips()
-            .with_sample_rate(Rate::from_hz(AUDIO_SAMPLE_RATE))
-            .with_data_format(DataFormat::Data16Channel16)
-            .with_channels(Channels::STEREO),
-    )
-    .expect("Failed to initialize I2S");
+    let mut local_controls = Controls::new_const();
+    let delay = Delay::new();
 
-    let mut i2s_tx = i2s
-        .i2s_tx
-        .with_bclk(peripherals.GPIO14)
-        .with_ws(peripherals.GPIO13)
-        .with_dout(peripherals.GPIO12)
-        .build(tx_descriptors);
-
-    let mut buffer = vec![0.0; AUDIO_BUFFER_SIZE];
-    let mut i2s_frames = [0i16; AUDIO_BUFFER_SIZE * 2];
-
-    // Main audio loop
+    local_controls.read(&mut adc_inputs, &switch_inputs);
     loop {
-        controls.read(&mut adc_inputs, &switch_inputs);
-        voice.update_controls(&controls, &WAVETABLES);
-        effects.update_params(&controls);
-
-        // Generate mono audio
-        voice.process_buffer(&mut buffer);
-
-        // Apply effects in mono
-        effects.process_buffer(&mut buffer);
-
-        // Apply master volume
-        for sample in buffer.iter_mut() {
-            *sample *= controls.master_volume;
-        }
-
-        for (i, sample) in buffer.iter().enumerate() {
-            let pcm = (*sample).clamp(-1.0, 1.0) * 32_767.0;
-            let pcm = pcm as i16;
-            let idx = i * 2;
-            i2s_frames[idx] = pcm;
-            i2s_frames[idx + 1] = pcm;
-        }
-
-        i2s_tx
-            .write_words(&i2s_frames)
-            .expect("Failed to write I2S audio frame");
+        local_controls.read(&mut adc_inputs, &switch_inputs);
+        CONTROLS_SIGNAL.signal(local_controls.clone());
+        delay.delay_millis(1);
     }
 }
